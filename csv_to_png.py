@@ -1,13 +1,12 @@
 import argparse
 import csv
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# Map French months to English for parsing
 FR_MONTHS = {
     "janv.": "Jan",
     "févr.": "Feb",
@@ -24,73 +23,167 @@ FR_MONTHS = {
 }
 
 
-def parse_fr_date(date_str):
-    try:
-        for fr, en in FR_MONTHS.items():
-            if fr in date_str.lower():
-                date_str = date_str.lower().replace(fr, en)
-        return datetime.strptime(date_str, "%d-%b-%Y")
-    except:
+def parse_date(date_str):
+    if not date_str:
         return None
+    date_str = str(date_str).strip()
+
+    # 1. Handle Excel numeric serial dates
+    try:
+        val = float(date_str)
+        return datetime(1899, 12, 30) + timedelta(days=val)
+    except ValueError:
+        pass
+
+    # 2. Handle string dates (French/English fallback)
+    s = date_str.lower()
+    for fr, en in FR_MONTHS.items():
+        if fr in s:
+            s = s.replace(fr, en)
+
+    formats = [
+        "%d-%b-%Y",
+        "%d-%b-%y",
+        "%d/%m/%Y",
+        "%d/%m/%y",
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def generate_png(input_path, output_path):
     if not output_path:
         output_path = os.path.splitext(input_path)[0] + ".png"
 
-    tasks = []
     with open(input_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 3:
+        rows = list(csv.reader(f))
+
+    if not rows:
+        print("No data found in CSV.")
+        return
+
+    # Fallback default configuration
+    task_idx = 0
+    start_idx = 1
+    end_idx = 2
+
+    # Robust Auto-detection of Column Headers
+    for row in rows[:8]:
+        row_lower = [str(cell).lower().strip() for cell in row]
+
+        t_idx = -1
+        for kw in [
+            "task",
+            "tâche",
+            "tache",
+            "name",
+            "nom",
+            "item",
+            "titre",
+            "title",
+        ]:
+            for idx, cell in enumerate(row_lower):
+                if kw in cell:
+                    t_idx = idx
+                    break
+            if t_idx != -1:
+                break
+
+        s_idx = -1
+        for kw in ["start", "début", "debut", "planifié"]:
+            for idx, cell in enumerate(row_lower):
+                if kw in cell:
+                    s_idx = idx
+                    break
+            if s_idx != -1:
+                break
+
+        e_idx = -1
+        for kw in ["end", "fin", "échéance", "echeance", "limite"]:
+            for idx, cell in enumerate(row_lower):
+                if kw in cell:
+                    e_idx = idx
+                    break
+            if e_idx != -1:
+                break
+
+        if s_idx != -1 and e_idx != -1:
+            task_idx = t_idx if t_idx != -1 else 0
+            start_idx = s_idx
+            end_idx = e_idx
+            print(
+                f"Auto-detected -> Task: col {task_idx}, Start: col {start_idx}, End: col {end_idx}"
+            )
+            break
+
+    tasks = []
+    for row in rows:
+        if max(task_idx, start_idx, end_idx) >= len(row):
+            continue
+
+        start = parse_date(row[start_idx])
+        end = parse_date(row[end_idx])
+        task_name = row[task_idx].strip()
+
+        if start and end and task_name:
+            if any(
+                kw in task_name.lower()
+                for kw in ["task", "tâche", "tache", "nom", "item"]
+            ):
                 continue
-            start = parse_fr_date(row[1])
-            end = parse_fr_date(row[2])
-            if start and end:
-                # Format: "Jan 05 - Feb 27"
-                interval = f"{row[1].split('-')[1]} {row[1].split('-')[0]} - {row[2].split('-')[1]} {row[2].split('-')[0]}"
-                tasks.append(
-                    {
-                        "Task": row[0],
-                        "Start": start,
-                        "End": end,
-                        "Interval": interval,
-                    }
+
+            # NEW: Smart year display logic for the sub-label column
+            if start.year == end.year:
+                interval = (
+                    f"{start.strftime('%b %d')} - {end.strftime('%b %d, %Y')}"
                 )
+            else:
+                interval = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
+
+            tasks.append(
+                {
+                    "Task": task_name,
+                    "Start": start,
+                    "End": end,
+                    "Interval": interval,
+                }
+            )
 
     if not tasks:
-        print("No valid tasks found.")
+        print("No valid tasks found after processing row contents.")
         return
 
     df = pd.DataFrame(tasks).iloc[::-1].reset_index(drop=True)
 
-    # UI Constants
     MONDAY_GREEN = "#6AB547"
     TEXT_MAIN = "#333333"
     TEXT_SUB = "#888888"
     GRID_COLOR = "#F4F4F4"
 
-    # Larger figure size for clarity
     fig, ax = plt.subplots(figsize=(18, 10), facecolor="white")
-
-    # Calculate global date range for the axis
     min_date = df["Start"].min()
     max_date = df["End"].max()
 
     for i, task in enumerate(df.itertuples()):
-        # Draw the pill-shaped bar
+        # A one-day task has Start == End: a zero-length line is not drawn,
+        # so give the bar a minimal one-day width (rendered as a round dot).
+        bar_end = max(task.End, task.Start + timedelta(days=1))
         ax.plot(
-            [task.Start, task.End],
+            [task.Start, bar_end],
             [i, i],
             color=MONDAY_GREEN,
             linewidth=26,
             solid_capstyle="round",
             zorder=3,
+            clip_on=False,
         )
 
-        # Labels - Positioned to the left of the start of the chart
-        # We use transform=ax.get_yaxis_transform() so X is in "axis fraction"
-        # but Y is in "data coordinates". -0.02 means 2% to the left of the axis.
         ax.text(
             -0.02,
             i + 0.12,
@@ -114,39 +207,30 @@ def generate_png(input_path, output_path):
             transform=ax.get_yaxis_transform(),
         )
 
-    # X-Axis Timeline Formatting
     ax.xaxis.set_major_locator(mdates.MonthLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
 
-    # Style the ticks
     plt.xticks(rotation=45, ha="right", color=TEXT_SUB, fontsize=11)
-
-    # Grid and Aesthetic styling
     ax.grid(axis="x", color=GRID_COLOR, linestyle="-", linewidth=1.5, zorder=1)
     ax.set_yticks([])
 
-    # Hide top/right/left borders
     for spine in ["left", "top", "right"]:
         ax.spines[spine].set_visible(False)
     ax.spines["bottom"].set_color("#CCCCCC")
 
-    # Set the visible data range
-    ax.set_xlim(min_date, max_date)
-
-    # Final Layout Tweaks
+    # Small padding so bars at the edges (e.g. a one-day task) aren't clipped
+    pad = max((max_date - min_date) * 0.01, timedelta(days=2))
+    ax.set_xlim(min_date - pad, max_date + pad)
     plt.margins(y=0.1)
-
-    # subplots_adjust + bbox_inches='tight' is the magic combo
     plt.subplots_adjust(left=0.4, bottom=0.2, right=0.95)
 
-    # Save with 'tight' to ensure no text is cut off
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Successfully generated: {output_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--input", required=True)
+    parser.add_argument("-i", "--input")
     parser.add_argument("-o", "--output")
     args = parser.parse_args()
     generate_png(args.input, args.output)
