@@ -4,7 +4,7 @@ import sys
 
 # Import the core functions from your previous scripts
 try:
-    from csv_to_png import generate_png
+    from csv_to_png import generate_png, parse_date
     from xlsx_to_csv import convert_xlsx_to_csv_manual
 except ImportError:
     print(
@@ -26,7 +26,19 @@ def main():
         help="Path for the final .png file (default: same as input)",
     )
 
+    parser.add_argument(
+        "--t0",
+        help="Reference date T0 (e.g. 2026-11-09 or 09/11/2026): show offsets "
+        "relative to T0 instead of calendar dates (blind planning)",
+    )
+
     args = parser.parse_args()
+
+    t0 = None
+    if args.t0:
+        t0 = parse_date(args.t0)
+        if t0 is None:
+            parser.error(f"Cannot parse --t0 date: {args.t0}")
 
     # 1. Define paths
     input_xlsx = args.input
@@ -44,7 +56,7 @@ def main():
             print(
                 f"--- Step 2: Generating modern Gantt chart: {output_png} ---"
             )
-            generate_png(temp_csv, output_png)
+            generate_png(temp_csv, output_png, t0)
         else:
             print(
                 "Error: Temporary CSV was not created. Check Step 1 for errors."
